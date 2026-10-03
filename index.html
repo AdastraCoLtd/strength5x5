@@ -159,16 +159,41 @@ function platesPerSide(weight, bar, unit) {
   return out;
 }
 
-function warmupSets(work, bar, unit) {
+/* Warmup sets, following the Stronglifts 5x5 warmup guidance:
+   - Squat, Bench, OHP: two sets of 5 with the empty bar.
+   - Deadlift, Row: never the empty bar. Start loaded so the plates rest on the
+     floor (Deadlift 60kg/135lb, Row 30-40kg/65-95lb).
+   - Then evenly spaced jumps of at most 20kg/45lb up to the work weight.
+   - Every warmup set is 5 reps. Heavier work weights get more sets, lighter
+     ones get fewer, so light lifters don't grind through tiny jumps. */
+const WARMUP = {
+  kg: { maxJump: 20, minJump: 10, floorStarts: { deadlift: [60, 40], row: [40, 30] } },
+  lb: { maxJump: 45, minJump: 25, floorStarts: { deadlift: [135, 95], row: [95, 65] } },
+};
+
+function warmupSets(work, bar, unit, lift) {
   if (work <= bar) return [];
+  const cfg = WARMUP[unit] || WARMUP.kg;
   const grain = unit === "lb" ? 5 : 2.5; // 2 × smallest plate — minimum achievable step
   const rnd = (w) => Math.round(w / grain) * grain;
-  const out = [{ weight: bar, reps: 5 }, { weight: bar, reps: 5 }];
-  const ramps = [{ pct: 0.4, reps: 5 }, { pct: 0.6, reps: 3 }, { pct: 0.8, reps: 2 }];
-  let prev = bar;
-  for (const r of ramps) {
-    const w = rnd(work * r.pct);
-    if (w > prev && w < work) { out.push({ weight: w, reps: r.reps }); prev = w; }
+  const floorStarts = cfg.floorStarts[lift];
+  const out = [];
+  let start;
+  if (floorStarts) {
+    // Heaviest standard floor weight that still leaves a real jump to the work weight.
+    // If none fits, the work weight is already the lightest floor load: no warmup.
+    start = floorStarts.find((s) => s > bar && s <= work - cfg.minJump);
+    if (start == null) return [];
+    out.push({ weight: start, reps: 5 });
+  } else {
+    start = bar;
+    out.push({ weight: bar, reps: 5 }, { weight: bar, reps: 5 });
+  }
+  const steps = Math.ceil((work - start) / cfg.maxJump);
+  let prev = start;
+  for (let i = 1; i < steps; i++) {
+    const w = rnd(start + ((work - start) * i) / steps);
+    if (w > prev && w < work) { out.push({ weight: w, reps: 5 }); prev = w; }
   }
   return out;
 }
@@ -249,7 +274,7 @@ function ExerciseCard({ lift, weight, sets, warmDone, showWarmup, last, bar, uni
   const plates = platesPerSide(weight, bar, unit);
   const done = sets.filter((s) => s === TARGET_REPS).length;
   const total = SET_COUNT[lift];
-  const warm = showWarmup ? warmupSets(weight, bar, unit) : [];
+  const warm = showWarmup ? warmupSets(weight, bar, unit, lift) : [];
   return (
     <div className="card" style={{ overflow: "hidden" }}>
       <div className="row between aie" style={{ padding: "14px 16px 8px" }}>
@@ -619,7 +644,7 @@ function App() {
       const sets = {}, warmups = {};
       WORKOUTS[which].forEach((l) => {
         sets[l] = Array(SET_COUNT[l]).fill(null);
-        warmups[l] = Array(warmupSets(d.weights[l], d.bar, d.unit).length).fill(false);
+        warmups[l] = Array(warmupSets(d.weights[l], d.bar, d.unit, l).length).fill(false);
       });
       return { ...d, current: { workout: which, sets, warmups } };
     });
