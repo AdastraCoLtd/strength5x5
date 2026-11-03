@@ -1,5 +1,5 @@
 /* 5x5 Workout service worker — offline support via cache-first app shell. */
-const CACHE = "5x5workout-v14";
+const CACHE = "5x5workout-v15";
 const ASSETS = [
   "./",
   "./index.html",
@@ -10,7 +10,10 @@ const ASSETS = [
 ];
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)));
+  // cache: "reload" skips the HTTP cache (GitHub Pages sends max-age=600), so a new
+  // version never stores the previous version's files.
+  e.waitUntil(caches.open(CACHE).then((c) =>
+    c.addAll(ASSETS.map((u) => new Request(u, { cache: "reload" })))));
   self.skipWaiting();
 });
 

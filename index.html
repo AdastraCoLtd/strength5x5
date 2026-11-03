@@ -1393,8 +1393,32 @@ ReactDOM.createRoot(document.getElementById("root")).render(<App />);
 <script>
   /* register the service worker for offline use */
   if ("serviceWorker" in navigator) {
+    /* When a new version takes over, reload so it shows on this open rather than
+       the next. Not mid-workout or mid-rest: after a reload the browser blocks the
+       rest timer's beep/vibration until the next tap, so wait until it's over. */
+    const hadController = !!navigator.serviceWorker.controller; // false on first install: nothing to refresh
+    const busy = () => {
+      try {
+        const d = JSON.parse(localStorage.getItem("strong5x5-v1"));
+        return !!(d && (d.current || (d.restEndsAt && d.restEndsAt > Date.now())));
+      } catch (e) { return false; }
+    };
+    let reloading = false;
+    const reloadWhenIdle = () => {
+      if (reloading) return;
+      if (busy()) { setTimeout(reloadWhenIdle, 5000); return; }
+      reloading = true;
+      location.reload();
+    };
+    navigator.serviceWorker.addEventListener("controllerchange", () => { if (hadController) reloadWhenIdle(); });
+
     window.addEventListener("load", () => {
-      navigator.serviceWorker.register("sw.js").catch((e) => console.warn("SW failed", e));
+      navigator.serviceWorker.register("sw.js").then((reg) => {
+        // Switching back to the app doesn't re-check for updates by itself.
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "visible") reg.update().catch(() => {});
+        });
+      }).catch((e) => console.warn("SW failed", e));
     });
   }
 </script>
