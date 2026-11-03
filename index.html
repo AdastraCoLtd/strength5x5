@@ -125,19 +125,24 @@ const LIFTS = {
   row:      { name: "Barbell Row" },
   ohp:      { name: "Overhead Press" },
   deadlift: { name: "Deadlift" },
+  curl:     { name: "Dumbbell Curl", dumbbell: true },
 };
-const WORKOUTS = { A: ["squat", "bench", "row"], B: ["squat", "ohp", "deadlift"] };
-const SET_COUNT = { squat: 5, bench: 5, row: 5, ohp: 5, deadlift: 1 };
+const WORKOUTS = { A: ["squat", "bench", "row", "curl"], B: ["squat", "ohp", "deadlift", "curl"] };
+const SET_COUNT = { squat: 5, bench: 5, row: 5, ohp: 5, deadlift: 1, curl: 3 };
 const TARGET_REPS = 5;
+const REPS = { curl: 10 }; // per-lift rep target where it isn't TARGET_REPS
+const targetReps = (lift) => REPS[lift] || TARGET_REPS;
+const isDumbbell = (lift) => !!(LIFTS[lift] && LIFTS[lift].dumbbell);
+const dbStep = (unit) => (unit === "lb" ? 5 : 2); // typical dumbbell jump
 const PLATES = { kg: [25, 20, 15, 10, 5, 2.5, 1.25], lb: [45, 35, 25, 10, 5, 2.5] };
 const REST_PRESETS = [90, 120, 150, 180, 240, 300];
 const STORE_KEY = "strong5x5-v1";
 
 const defaultData = () => ({
   unit: "kg", inc: 2.5, incDeadlift: 5, bar: 20, restDuration: 180, showWarmup: true,
-  weights: { squat: 20, bench: 20, row: 30, ohp: 20, deadlift: 40 },
-  fails: { squat: 0, bench: 0, row: 0, ohp: 0, deadlift: 0 },
-  autoInc: { squat: true, bench: true, row: true, ohp: true, deadlift: true },
+  weights: { squat: 20, bench: 20, row: 30, ohp: 20, deadlift: 40, curl: 12 },
+  fails: { squat: 0, bench: 0, row: 0, ohp: 0, deadlift: 0, curl: 0 },
+  autoInc: { squat: true, bench: true, row: true, ohp: true, deadlift: true, curl: false },
   nextWorkout: "A", current: null, restEndsAt: null, history: [],
 });
 
@@ -172,7 +177,7 @@ const WARMUP = {
 };
 
 function warmupSets(work, bar, unit, lift) {
-  if (work <= bar) return [];
+  if (isDumbbell(lift) || work <= bar) return [];
   const cfg = WARMUP[unit] || WARMUP.kg;
   const grain = unit === "lb" ? 5 : 2.5; // 2 × smallest plate — minimum achievable step
   const rnd = (w) => Math.round(w / grain) * grain;
@@ -205,9 +210,11 @@ function convert(data, unit) {
   const bar = unit === "lb" ? 45 : 20;
   const r = (w) => Math.max(bar, roundStep(w * f, grain));
   const weights = {};
-  for (const k in data.weights) weights[k] = r(data.weights[k]);
+  const rDb = (w) => Math.max(dbStep(unit), roundStep(w * f, dbStep(unit) / 2));
+  const rFor = (lift, w) => (isDumbbell(lift) ? rDb(w) : r(w));
+  for (const k in data.weights) weights[k] = rFor(k, data.weights[k]);
   const history = data.history.map((h) => ({
-    ...h, entries: h.entries.map((e) => ({ ...e, weight: r(e.weight) })),
+    ...h, entries: h.entries.map((e) => ({ ...e, weight: rFor(e.lift, e.weight) })),
   }));
   return {
     ...data, unit, bar, weights, history,
@@ -254,25 +261,30 @@ const Store = {
 };
 
 /* ------------------------------------------------------------------ */
-function SetButton({ value, single, onTap }) {
+// Multi-set buttons are sized as one of five (row gap 8px), so 3-set rows match the 5×5 rows.
+const SET_SLOT = { flex: "0 0 calc((100% - 32px) / 5)", aspectRatio: "1" };
+
+function SetButton({ value, target, single, onTap }) {
   let style = { background: "#fafafa", border: "2px solid #d4d4d4", color: "#d4d4d4" };
-  if (value === TARGET_REPS) style = { background: "#f97316", border: "2px solid #f97316", color: "#fff" };
+  if (value === target) style = { background: "#f97316", border: "2px solid #f97316", color: "#fff" };
   else if (value != null && value > 0) style = { background: "#fbbf24", border: "2px solid #fbbf24", color: "#171717" };
   else if (value === 0) style = { background: "#fef2f2", border: "2px solid #f87171", color: "#ef4444" };
   return (
     <button
       onClick={onTap}
       className="setbtn"
-      style={{ ...style, ...(single ? { width: 64, height: 64 } : { flex: 1, aspectRatio: "1" }) }}
+      style={{ ...style, ...(single ? { width: 64, height: 64 } : SET_SLOT) }}
     >
-      {value == null ? TARGET_REPS : value}
+      {value == null ? target : value}
     </button>
   );
 }
 
 function ExerciseCard({ lift, weight, sets, warmDone, showWarmup, last, bar, unit, onTapSet, onTapWarmup }) {
-  const plates = platesPerSide(weight, bar, unit);
-  const done = sets.filter((s) => s === TARGET_REPS).length;
+  const db = isDumbbell(lift);
+  const plates = db ? [] : platesPerSide(weight, bar, unit);
+  const target = targetReps(lift);
+  const done = sets.filter((s) => s === target).length;
   const total = SET_COUNT[lift];
   const warm = showWarmup ? warmupSets(weight, bar, unit, lift) : [];
   return (
@@ -285,7 +297,7 @@ function ExerciseCard({ lift, weight, sets, warmDone, showWarmup, last, bar, uni
           <div className="row aib gap15" style={{ marginTop: 2 }}>
             <span style={{ ...D, fontSize: 36, color: "#171717", fontWeight: 700, lineHeight: 1 }}>{fmt(weight)}</span>
             <span style={{ fontSize: 14, color: "#a3a3a3", fontWeight: 600 }}>{unit}</span>
-            <span style={{ fontSize: 14, color: "#a3a3a3", marginLeft: 6 }}>{total}×{TARGET_REPS}</span>
+            <span style={{ fontSize: 14, color: "#a3a3a3", marginLeft: 6 }}>{total}×{target}</span>
           </div>
         </div>
         <div style={{ ...D, fontSize: 24, fontWeight: 700, lineHeight: 1, color: done === total ? "#f97316" : "#d4d4d4" }}>
@@ -293,6 +305,11 @@ function ExerciseCard({ lift, weight, sets, warmDone, showWarmup, last, bar, uni
         </div>
       </div>
 
+      {db ? (
+        <div className="row aic gap1" style={{ padding: "0 16px 8px", minHeight: 18 }}>
+          <span style={{ fontSize: 10, color: "#a3a3a3" }}>per dumbbell</span>
+        </div>
+      ) : (
       <div className="row aic gap1 wrapf" style={{ padding: "0 16px 8px", minHeight: 18 }}>
         {plates.length === 0
           ? <span style={{ fontSize: 11, color: "#a3a3a3" }}>empty bar</span>
@@ -303,6 +320,7 @@ function ExerciseCard({ lift, weight, sets, warmDone, showWarmup, last, bar, uni
             ))}
         <span style={{ fontSize: 10, color: "#a3a3a3", marginLeft: 2 }}>per side</span>
       </div>
+      )}
 
       {warm.length > 0 && (
         <div style={{ padding: "0 16px 10px" }}>
@@ -357,7 +375,7 @@ function ExerciseCard({ lift, weight, sets, warmDone, showWarmup, last, bar, uni
       )}
       <div className="row gap2" style={{ padding: "6px 16px 12px" }}>
         {sets.map((v, i) => (
-          <SetButton key={i} value={v} single={total === 1} onTap={() => onTapSet(lift, i)} />
+          <SetButton key={i} value={v} target={target} single={total === 1} onTap={() => onTapSet(lift, i)} />
         ))}
       </div>
 
@@ -617,7 +635,23 @@ function App() {
     const p = Store.load();
     if (p) {
       if (p.restEndsAt && p.restEndsAt < Date.now()) p.restEndsAt = null;
-      setData({ ...defaultData(), ...p });
+      const def = defaultData();
+      // Per-lift maps are merged so lifts added in later versions get their defaults.
+      const merged = {
+        ...def, ...p,
+        weights: { ...def.weights, ...p.weights },
+        fails: { ...def.fails, ...p.fails },
+        autoInc: { ...def.autoInc, ...p.autoInc },
+      };
+      // A workout started before a lift was added still needs set slots for it.
+      if (merged.current) {
+        const sets = { ...merged.current.sets };
+        WORKOUTS[merged.current.workout].forEach((l) => {
+          if (!sets[l]) sets[l] = Array(SET_COUNT[l]).fill(null);
+        });
+        merged.current = { ...merged.current, sets };
+      }
+      setData(merged);
     }
     setLoaded(true);
   }, []);
@@ -653,12 +687,13 @@ function App() {
   const tapSet = useCallback((lift, idx) => {
     setData((d) => {
       if (!d.current) return d;
-      const order = [null, 5, 4, 3, 2, 1, 0];
+      const target = targetReps(lift);
+      const order = [null, ...Array.from({ length: target + 1 }, (_, i) => target - i)];
       const cur = d.current.sets[lift][idx];
       const next = order[(order.indexOf(cur) + 1) % order.length];
       const sets = { ...d.current.sets, [lift]: d.current.sets[lift].slice() };
       sets[lift][idx] = next;
-      const startRest = cur == null && next === TARGET_REPS;
+      const startRest = cur == null && next === target;
       return {
         ...d, current: { ...d.current, sets },
         restEndsAt: startRest ? Date.now() + d.restDuration * 1000 : d.restEndsAt,
@@ -691,10 +726,11 @@ function App() {
       const entries = [], results = [];
       for (const lift of lifts) {
         const reps = d.current.sets[lift].map((r) => (r == null ? 0 : r));
-        const success = reps.length === SET_COUNT[lift] && reps.every((r) => r >= TARGET_REPS);
+        const success = reps.length === SET_COUNT[lift] && reps.every((r) => r >= targetReps(lift));
         const weight = d.weights[lift];
         entries.push({ lift, weight, reps, success });
-        const step = lift === "deadlift" ? d.incDeadlift : d.inc;
+        const db = isDumbbell(lift);
+        const step = db ? dbStep(d.unit) : lift === "deadlift" ? d.incDeadlift : d.inc;
         const shouldInc = (d.autoInc || {})[lift] !== false;
         if (success && shouldInc) {
           weights[lift] = weight + step; fails[lift] = 0;
@@ -705,7 +741,7 @@ function App() {
         } else {
           const f = (d.fails[lift] || 0) + 1;
           if (f >= 3) {
-            const dl = Math.max(d.bar, roundStep(weight * 0.9, step));
+            const dl = Math.max(db ? step : d.bar, roundStep(weight * 0.9, step));
             weights[lift] = dl; fails[lift] = 0;
             results.push({ lift, type: "deload", from: weight, to: dl });
           } else {
@@ -799,8 +835,11 @@ function App() {
                 ...defaultData(),
                 unit: d.unit, inc: d.inc, incDeadlift: d.incDeadlift,
                 bar: d.bar, restDuration: d.restDuration, showWarmup: d.showWarmup,
-                history: result.history, weights: result.weights,
-                fails: result.fails, nextWorkout: result.nextWorkout,
+                history: result.history,
+                // The Stronglifts import only covers the 5 barbell lifts; keep the rest as they are.
+                weights: { ...d.weights, ...result.weights },
+                fails: { ...d.fails, ...result.fails },
+                nextWorkout: result.nextWorkout,
               })),
             })}
           />
@@ -899,7 +938,7 @@ function WorkoutTab({ data, lastFor, onStart, onTapSet, onTapWarmup, onFinish, o
               <span style={{ fontSize: 14, color: "#a3a3a3" }}>
                 <span style={{ ...D, color: "#171717", fontWeight: 700, fontSize: 18 }}>{fmt(data.weights[l])}</span>
                 <span style={{ marginLeft: 4 }}>{data.unit}</span>
-                <span style={{ marginLeft: 8 }}>{SET_COUNT[l]}×{TARGET_REPS}</span>
+                <span style={{ marginLeft: 8 }}>{SET_COUNT[l]}×{targetReps(l)}</span>
               </span>
             </div>
           ))}
@@ -998,7 +1037,7 @@ function ProgressTab({ data, lift, setLift }) {
   return (
     <div>
       <div className="label mb2">Current weights</div>
-      <div className="mb5" style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 6 }}>
+      <div className="mb5" style={{ display: "grid", gridTemplateColumns: "repeat(" + Object.keys(LIFTS).length + ",1fr)", gap: 6 }}>
         {Object.keys(LIFTS).map((l) => (
           <div key={l} className="card" style={{ padding: "8px 0", textAlign: "center" }}>
             <div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: ".05em", color: "#a3a3a3" }}>{l.slice(0, 4)}</div>
@@ -1176,7 +1215,8 @@ function SettingsTab({ data, setData, onClear, onImport }) {
                 <SetRow label={v.name}>
                   <div className="row aic gap2">
                     <Toggle on={inc} onChange={(val) => setData((d) => ({ ...d, autoInc: { ...(d.autoInc || {}), [k]: val } }))} />
-                    <Stepper value={data.weights[k]} unit={data.unit} step={data.inc} min={data.bar}
+                    <Stepper value={data.weights[k]} unit={data.unit}
+                      step={v.dumbbell ? dbStep(data.unit) : data.inc} min={v.dumbbell ? micro : data.bar}
                       onChange={(n) => setField(k, n)}
                       onEdit={() => setEditing({ field: k, title: v.name, value: data.weights[k] })} />
                   </div>
