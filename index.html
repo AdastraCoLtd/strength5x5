@@ -143,7 +143,7 @@ const defaultData = () => ({
   weights: { squat: 20, bench: 20, row: 30, ohp: 20, deadlift: 40, curl: 12 },
   fails: { squat: 0, bench: 0, row: 0, ohp: 0, deadlift: 0, curl: 0 },
   autoInc: { squat: true, bench: true, row: true, ohp: true, deadlift: true, curl: false },
-  nextWorkout: "A", current: null, restEndsAt: null, history: [],
+  nextWorkout: "A", current: null, restEndsAt: null, history: [], progressRange: "6M",
 });
 
 const fmt = (w) => {
@@ -538,6 +538,37 @@ function parseCSV(text) {
   return rows;
 }
 
+/* Merge an import into existing data instead of replacing it. Imported workouts
+   on a day that already has a workout are skipped, so re-importing the same file
+   is harmless. Each lift's working weight comes from whichever side has the most
+   recent session of that lift. */
+const dayKey = (iso) => {
+  const d = new Date(iso);
+  return d.getFullYear() + "-" + (d.getMonth() + 1) + "-" + d.getDate();
+};
+function mergeImport(d, result) {
+  const have = new Set(d.history.map((h) => dayKey(h.date)));
+  const added = result.history.filter((h) => !have.has(dayKey(h.date)));
+  const history = [...d.history, ...added].sort((a, b) => new Date(b.date) - new Date(a.date));
+  const lastOf = (hist, lift) => {
+    let t = -Infinity;
+    for (const h of hist) if (h.entries.some((e) => e.lift === lift)) t = Math.max(t, new Date(h.date).getTime());
+    return t;
+  };
+  const weights = { ...d.weights }, fails = { ...d.fails };
+  for (const lift in result.weights) {
+    if (lastOf(result.history, lift) > lastOf(d.history, lift)) {
+      weights[lift] = result.weights[lift];
+      fails[lift] = result.fails[lift] || 0;
+    }
+  }
+  const newestFromImport = history.length && added.includes(history[0]);
+  return {
+    data: { ...d, history, weights, fails, nextWorkout: newestFromImport ? result.nextWorkout : d.nextWorkout },
+    added: added.length, skipped: result.history.length - added.length,
+  };
+}
+
 function importStrongliftsCsv(csvText) {
   const rows = parseCSV(csvText);
   if (rows.length < 2) return null;
@@ -819,7 +850,8 @@ function App() {
           />
         )}
         {tab === "history" && <HistoryTab data={data} />}
-        {tab === "progress" && <ProgressTab data={data} lift={progressLift} setLift={setProgressLift} />}
+        {tab === "progress" && <ProgressTab data={data} lift={progressLift} setLift={setProgressLift}
+          range={data.progressRange} setRange={(r) => setData((d) => ({ ...d, progressRange: r }))} />}
         {tab === "settings" && (
           <SettingsTab
             data={data} setData={setData}
@@ -828,20 +860,18 @@ function App() {
               body: "Workout history, weights and progress will be permanently deleted.",
               action: () => setData(defaultData()),
             })}
-            onImport={(result) => setConfirm({
-              title: "Import workout history?",
-              body: `Found ${result.history.length} workout${result.history.length === 1 ? "" : "s"} from Stronglifts. This will replace your current history and update your working weights.`,
-              action: () => setData(d => ({
-                ...defaultData(),
-                unit: d.unit, inc: d.inc, incDeadlift: d.incDeadlift,
-                bar: d.bar, restDuration: d.restDuration, showWarmup: d.showWarmup,
-                history: result.history,
-                // The Stronglifts import only covers the 5 barbell lifts; keep the rest as they are.
-                weights: { ...d.weights, ...result.weights },
-                fails: { ...d.fails, ...result.fails },
-                nextWorkout: result.nextWorkout,
-              })),
-            })}
+            onImport={(result) => {
+              const { added, skipped } = mergeImport(data, result);
+              const s = (n) => (n === 1 ? "" : "s");
+              setConfirm({
+                title: "Import workout history?",
+                body: `Found ${result.history.length} workout${s(result.history.length)} from Stronglifts. `
+                  + `${added} will be added to your history`
+                  + (skipped ? `; ${skipped} on days you already have a workout will be skipped.` : ".")
+                  + " Working weights update only for lifts where the import is more recent.",
+                action: () => setData((d) => mergeImport(d, result).data),
+              });
+            }}
           />
         )}
       </div>
@@ -1020,13 +1050,24 @@ function HistoryTab({ data }) {
   );
 }
 
-function ProgressTab({ data, lift, setLift }) {
+const DAY = 86400000;
+const RANGES = [
+  { id: "1M", days: 30 }, { id: "3M", days: 91 }, { id: "6M", days: 182 },
+  { id: "1Y", days: 365 }, { id: "All", days: null },
+];
+
+function ProgressTab({ data, lift, setLift, range, setRange }) {
+  const rangeDays = (RANGES.find((r) => r.id === range) || RANGES[RANGES.length - 1]).days;
+  const now = Date.now();
+  const from = rangeDays ? now - rangeDays * DAY : null;
   const series = [...data.history].reverse()
     .filter((h) => h.entries.some((e) => e.lift === lift))
-    .map((h, i) => {
-      const e = h.entries.find((x) => x.lift === lift);
-      return { i: i + 1, weight: e.weight, date: new Date(h.date).toLocaleDateString(undefined, { month: "short", day: "numeric" }) };
-    });
+    .map((h) => ({ t: new Date(h.date).getTime(), weight: h.entries.find((x) => x.lift === lift).weight }))
+    .filter((p) => from == null || p.t >= from);
+  // Fixed spans always show the whole window; "All" fits the data.
+  const domain = from != null ? [from, now]
+    : series.length ? [series[0].t, Math.max(series[series.length - 1].t, series[0].t + DAY)] : null;
+  const hasAny = data.history.some((h) => h.entries.some((e) => e.lift === lift));
   const best = (l) => {
     let m = 0;
     data.history.forEach((h) => h.entries.forEach((e) => {
@@ -1063,11 +1104,23 @@ function ProgressTab({ data, lift, setLift }) {
             Best <span style={{ ...D, color: "#ea580c", fontWeight: 700 }}>{fmt(best(lift))}{data.unit}</span>
           </span>
         </div>
+        <div className="row gap1 mb3" style={{ background: "#f5f5f5", borderRadius: 8, padding: 2 }}>
+          {RANGES.map((r) => (
+            <button key={r.id} onClick={() => setRange(r.id)} className="flex1"
+              style={{ padding: "4px 0", borderRadius: 6, fontSize: 12, fontWeight: 700,
+                       background: range === r.id ? "#f97316" : "transparent",
+                       color: range === r.id ? "#fff" : "#737373" }}>
+              {r.id}
+            </button>
+          ))}
+        </div>
         {series.length === 0 ? (
-          <div className="center" style={{ height: 176, color: "#a3a3a3", fontSize: 14 }}>Log a workout to see progress</div>
+          <div className="center" style={{ height: 176, color: "#a3a3a3", fontSize: 14 }}>
+            {hasAny ? "No workouts in this period" : "Log a workout to see progress"}
+          </div>
         ) : (
           <div style={{ height: 176 }}>
-            <MiniChart series={series} />
+            <MiniChart series={series} domain={domain} />
           </div>
         )}
       </div>
@@ -1077,33 +1130,85 @@ function ProgressTab({ data, lift, setLift }) {
 
 /* Inline SVG line chart — no chart library, so the app stays a self-contained
    single file with minimal dependencies (better for offline reliability). */
-function MiniChart({ series }) {
-  const W = 320, H = 176, padL = 34, padR = 10, padT = 12, padB = 24;
+/* Weight gridlines: the smallest "nice" step giving at most 4 intervals. A flat
+   or near-flat line is given a 10-unit window so it doesn't get 0.5 gridlines. */
+function weightTicks(min, max) {
+  if (max - min < 10) { const mid = (min + max) / 2; min = mid - 5; max = mid + 5; }
+  const NICE = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500];
+  const step = NICE.find((s) => (max - min) / s <= 4) || NICE[NICE.length - 1];
+  let lo = Math.floor(min / step) * step, hi = Math.ceil(max / step) * step;
+  if (hi === lo) { lo = Math.max(0, lo - step); hi += step; }
+  const ticks = [];
+  for (let t = lo; t <= hi + 1e-9; t += step) ticks.push(clean(t));
+  return { lo, hi, ticks };
+}
+
+/* Date ticks: the finest interval (week, 2 weeks, 1/2/3/6 months, 1/2 years) that
+   fits in at most 6 labels, so the axis coarsens as the span grows. */
+const DATE_STEPS = [
+  { days: 7 }, { days: 14 },
+  { months: 1 }, { months: 2 }, { months: 3 }, { months: 6 },
+  { months: 12 }, { months: 24 },
+];
+function dateTicks(t0, t1) {
+  const spanDays = (t1 - t0) / DAY;
+  const st = DATE_STEPS.find((s) => spanDays / (s.days || s.months * 30.4) <= 6) || DATE_STEPS[DATE_STEPS.length - 1];
+  const out = [];
+  if (st.days) {
+    const d = new Date(t0); d.setHours(0, 0, 0, 0);
+    while (d.getDay() !== 1 || d.getTime() < t0) d.setDate(d.getDate() + 1); // first Monday in range
+    for (; d.getTime() <= t1; d.setDate(d.getDate() + st.days)) {
+      out.push({ t: d.getTime(), label: d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) });
+    }
+    return out;
+  }
+  const d = new Date(t0); d.setHours(0, 0, 0, 0); d.setDate(1);
+  if (d.getTime() < t0) d.setMonth(d.getMonth() + 1);
+  while (d.getMonth() % Math.min(st.months, 12) !== 0) d.setMonth(d.getMonth() + 1); // align to Jan/Apr/Jul…
+  if (st.months === 24 && d.getFullYear() % 2) d.setFullYear(d.getFullYear() + 1);
+  for (; d.getTime() <= t1; d.setMonth(d.getMonth() + st.months)) {
+    let label;
+    if (st.months >= 12) label = String(d.getFullYear());
+    else {
+      label = d.toLocaleDateString(undefined, { month: "short" });
+      if (d.getMonth() === 0 || out.length === 0) label += " '" + String(d.getFullYear()).slice(2);
+    }
+    out.push({ t: d.getTime(), label });
+  }
+  return out;
+}
+
+function MiniChart({ series, domain }) {
+  const W = 320, H = 176, padL = 34, padR = 12, padT = 12, padB = 24;
   const ws = series.map((s) => s.weight);
-  let lo = Math.min(...ws) - 5, hi = Math.max(...ws) + 5;
-  const span = hi - lo || 1;
-  const n = series.length;
-  const x = (i) => padL + (n === 1 ? (W - padL - padR) / 2 : (i * (W - padL - padR)) / (n - 1));
-  const y = (w) => padT + (H - padT - padB) * (1 - (w - lo) / span);
-  const pts = series.map((s, i) => [x(i), y(s.weight)]);
+  const { lo, hi, ticks } = weightTicks(Math.min(...ws), Math.max(...ws));
+  const [t0, t1] = domain;
+  const x = (t) => padL + ((t - t0) / (t1 - t0 || 1)) * (W - padL - padR);
+  const y = (w) => padT + (H - padT - padB) * (1 - (w - lo) / (hi - lo || 1));
+  const pts = series.map((s) => [x(s.t), y(s.weight)]);
   const path = pts.map((p, i) => (i === 0 ? "M" : "L") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
-  const ticks = [lo, lo + span / 2, hi];
+  const showDots = pts.length <= 40;
   return (
     <svg viewBox={"0 0 " + W + " " + H} width="100%" height={H} style={{ display: "block" }}>
-      {ticks.map((t, i) => {
+      {ticks.map((t) => {
         const yy = y(t);
         return (
-          <g key={i}>
+          <g key={t}>
             <line x1={padL} y1={yy} x2={W - padR} y2={yy} stroke="#e5e5e5" strokeWidth="1" />
-            <text x={padL - 6} y={yy + 3} textAnchor="end" fontSize="10" fill="#a3a3a3">{fmt(Math.round(t))}</text>
+            <text x={padL - 6} y={yy + 3} textAnchor="end" fontSize="10" fill="#a3a3a3">{fmt(t)}</text>
           </g>
         );
       })}
-      {series.map((s, i) => (
-        <text key={i} x={x(i)} y={H - 8} textAnchor="middle" fontSize="10" fill="#a3a3a3">{s.date}</text>
+      {dateTicks(t0, t1).map((d) => (
+        <g key={d.t}>
+          <line x1={x(d.t)} y1={H - padB} x2={x(d.t)} y2={H - padB + 3} stroke="#d4d4d4" strokeWidth="1" />
+          <text x={x(d.t)} y={H - 8} textAnchor="middle" fontSize="10" fill="#a3a3a3">{d.label}</text>
+        </g>
       ))}
-      <path d={path} fill="none" stroke="#f97316" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
-      {pts.map((p, i) => <circle key={i} cx={p[0]} cy={p[1]} r="3.5" fill="#f97316" />)}
+      <path d={path} fill="none" stroke="#f97316" strokeWidth={showDots ? 2.5 : 2} strokeLinejoin="round" strokeLinecap="round" />
+      {showDots
+        ? pts.map((p, i) => <circle key={i} cx={p[0]} cy={p[1]} r="3.5" fill="#f97316" />)
+        : <circle cx={pts[pts.length - 1][0]} cy={pts[pts.length - 1][1]} r="3.5" fill="#f97316" />}
     </svg>
   );
 }
@@ -1264,7 +1369,7 @@ function SettingsTab({ data, setData, onClear, onImport }) {
         </button>
         {importErr && <p style={{ fontSize: 11, color: "#dc2626", margin: "6px 4px 0" }}>{importErr}</p>}
         <p style={{ fontSize: 11, color: "#a3a3a3", margin: "6px 4px 0" }}>
-          Import workout history exported from the Stronglifts app.
+          Import workout history exported from the Stronglifts app. It's added to your existing history; days you already have are skipped.
         </p>
       </div>
 
